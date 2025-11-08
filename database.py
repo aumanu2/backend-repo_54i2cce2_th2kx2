@@ -1,55 +1,58 @@
-"""
-Database Helper Functions
+from __future__ import annotations
 
-MongoDB helper functions ready to use in your backend code.
-Import and use these functions in your API endpoints for database operations.
-"""
-
-from pymongo import MongoClient
-from datetime import datetime, timezone
 import os
-from dotenv import load_dotenv
-from typing import Union
-from pydantic import BaseModel
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-# Load environment variables from .env file
-load_dotenv()
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
-_client = None
-db = None
+# Environment variables are auto-provided by the platform
+DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017")
+DATABASE_NAME = os.getenv("DATABASE_NAME", "appdb")
 
-database_url = os.getenv("DATABASE_URL")
-database_name = os.getenv("DATABASE_NAME")
+_client: Optional[AsyncIOMotorClient] = None
+_db: Optional[AsyncIOMotorDatabase] = None
 
-if database_url and database_name:
-    _client = MongoClient(database_url)
-    db = _client[database_name]
 
-# Helper functions for common database operations
-def create_document(collection_name: str, data: Union[BaseModel, dict]):
-    """Insert a single document with timestamp"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+def get_client() -> AsyncIOMotorClient:
+    global _client
+    if _client is None:
+        _client = AsyncIOMotorClient(DATABASE_URL, uuidRepresentation="standard")
+    return _client
 
-    # Convert Pydantic model to dict if needed
-    if isinstance(data, BaseModel):
-        data_dict = data.model_dump()
-    else:
-        data_dict = data.copy()
 
-    data_dict['created_at'] = datetime.now(timezone.utc)
-    data_dict['updated_at'] = datetime.now(timezone.utc)
+def get_db() -> AsyncIOMotorDatabase:
+    global _db
+    if _db is None:
+        _db = get_client()[DATABASE_NAME]
+    return _db
 
-    result = db[collection_name].insert_one(data_dict)
-    return str(result.inserted_id)
+# Backwards-compatible alias expected by the app description
+_db_alias = get_db
 
-def get_documents(collection_name: str, filter_dict: dict = None, limit: int = None):
-    """Get documents from collection"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
-    
-    cursor = db[collection_name].find(filter_dict or {})
+db = get_db()
+
+
+async def create_document(collection_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert a document with automatic timestamps and return the created document."""
+    now = datetime.now(timezone.utc)
+    payload = {**data, "created_at": data.get("created_at", now), "updated_at": now}
+    result = await db[collection_name].insert_one(payload)
+    payload["_id"] = result.inserted_id
+    return payload
+
+
+async def get_documents(
+    collection_name: str,
+    filter_dict: Optional[Dict[str, Any]] = None,
+    limit: int = 50,
+    sort: Optional[List[tuple]] = None,
+) -> List[Dict[str, Any]]:
+    """Query documents with an optional filter, limit, and sort."""
+    filter_dict = filter_dict or {}
+    cursor = db[collection_name].find(filter_dict)
+    if sort:
+        cursor = cursor.sort(sort)
     if limit:
         cursor = cursor.limit(limit)
-    
-    return list(cursor)
+    return [doc async for doc in cursor]
